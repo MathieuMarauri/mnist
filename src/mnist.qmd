@@ -3,6 +3,7 @@ title: "Digit detection on MNIST"
 author: 'Mathieu Marauri'
 format: 
     html:
+        self-contained: true
         theme: cerulean
         highlight: tango
         toc: true
@@ -15,6 +16,7 @@ format:
 execute:
     cache: true
     echo: false
+output-file: ../output/mnist.html
 tbl-cap-location: bottom
 ---
 
