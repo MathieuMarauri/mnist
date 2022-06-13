@@ -1,0 +1,9 @@
+*.DS_Store
+
+data/
+
+src/.jupyter_cache
+src/mnist_files
+src/model_checkpoint/
+
+*.html

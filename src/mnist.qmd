@@ -1,0 +1,997 @@
+---
+title: "Digit detection on MNIST"
+author: 'Mathieu Marauri'
+format: 
+    html:
+        theme: cerulean
+        highlight: tango
+        toc: true
+        toc-depth: 3
+        toc-title: Contents
+        toc-location: left
+        fig-width: 8
+        fig-height: 6
+        css: ../sources/styles.css
+execute:
+    cache: true
+    echo: false
+tbl-cap-location: bottom
+---
+
+--------
+
+This is a document for the [Digit recognizer challenge](https://www.kaggle.com/competitions/digit-recognizer/overview) on Kaggle. A deep learning model is trained on the [MNIST dataset](https://en.wikipedia.org/wiki/MNIST_database). The building blocks of a simple convolution neural net (CNN) are detailed in subsequent sections. The goal is to build an end-to-end CNN model that gives good enough performances.
+
+# Overview
+
+This document is divided into several parts. 
+
+* The inputs (train and test sets) are loaded and briefly looked at. 
+* A baseline convolution neural net is build and used to make the first submission to Kaggle.
+* Following sections are improvments made on the baseline model:
+    * Iteration 1: adding more layer to increase the learning capabilities of the model
+    * Iteration 2: test the effect of batch normalization and drop-out
+    * Iteration 3: improve the training by giving more time to the model (e.g. more epochs)
+    * Iteration 4: test the Adam optimizer
+    * Iteration 5: use data augmentation to improve the learning by adding noise to the data
+
+The different models build are compared by making submission to Kaggle. 
+
+# Set-up
+
+This document is generated using [Quarto](https://quarto.org/). The needed libraries are listed in the next code block. The source code is availbale [here]().
+
+```{python set-up}
+#| echo: true
+
+from keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from keras.layers import Dense, BatchNormalization, Flatten, Dropout
+from keras.layers.convolutional import Conv2D, MaxPooling2D
+from keras.models import Sequential
+from keras.preprocessing.image import ImageDataGenerator
+from keras.utils import np_utils
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from tensorflow import keras
+import time
+import visualkeras
+```
+
+```{python setup-doc}
+from IPython.display import display, Markdown
+from tabulate import tabulate
+```
+
+```{python matplotlib-setup}
+import matplotlib as mpl
+mpl.rcParams['axes.prop_cycle'] = mpl.cycler(color=["#4469B5", "#D4A418", "#434656", "#B1485A", "#867555"]) 
+plt.style.use('seaborn-whitegrid')
+plt.rcParams["font.family"] = "Gibson"
+plt.rcParams["font.size"] = 20
+plt.rcParams["figure.figsize"] = (6*1.61, 6)
+```
+
+```{python setup-log}
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
+```
+
+
+# Inputs
+
+Load the MNIST dataset and have a glance at the data. The data is processed to have the dimensions expected by the model that will later be built. The images must be arrays of size 28x28.
+
+## Training data
+
+```{python data-loading}
+#| echo: true
+
+# Load the train dataset
+train = pd.read_csv('../data/train.csv')
+
+# Build X_train and a y_train objects
+X_train = train.drop(columns='label')
+y_train = train['label']
+
+# Reshape the data to an array of 28x28 images, dimensions expected by the model that will be built
+X_train = np.array(X_train).reshape(-1,28,28,1)
+```
+
+```{python data-shape}
+display(Markdown("""
+The shape of the train set is {shape}.
+""".format(shape = X_train.shape)))
+```
+
+@fig-data-distrib displays the distribution of the labels in the training set. We can see that the digit are uniformly distributed. No special care has to be given when we will build the validation set.
+
+```{python data-distrib}
+#| label: fig-data-distrib
+#| fig-cap: "Distribution of digits in the training set"
+
+# Distribution of the digit in the train set
+labels, counts = np.unique(y_train, return_counts=True)
+plt.bar(labels, counts, align='center')
+plt.xticks(list(range(0, 10)))
+plt.xlabel('Digit')
+plt.ylabel('Number of occurences');
+```
+
+@fig-data-examples shows some images of digits from the training set.
+
+```{python}
+#| label: fig-data-examples
+#| fig-cap: "Examples of digit images"
+
+# Glance at the data
+count = 0
+sample_size = 20
+plt.figure(figsize=(16, 6))
+for i in np.random.permutation(X_train.shape[0])[:sample_size]:
+    count = count + 1
+    plt.subplot(1, sample_size, count)
+    plt.axhline("")
+    plt.axvline("")
+    plt.text(x=10, y=-10, s=y_train[i], fontsize=18, color="#4469B5")
+    plt.imshow(X_train[i].reshape(28, 28), cmap=plt.cm.Greys)
+plt.show();
+```
+
+There are 42K digits in the training set. Each image is of size 28x28x1 (there is only one color channel as images are in grayscale). The training set is quite balanced. Some digits can be more easily confused with others (5 and 6, 1 and 7, ...).
+
+### Pre-processing
+
+The inputs are standardized to avoid having too large weights in the model (causing unstabaility and difficulty to update them in the training process). 
+The output variable is converted to a binary vector (the last layer of the model will have 10 nodes). A 5 becomes [0, 0, 0, 0, 0, 1, 0, 0, 0, 0] for instance.
+
+A validation set is built to evaluate the model before making a submission on Kaggle.
+
+```{python}
+#| echo: true
+
+# Scale the inputs to the range [0,1]
+X_train = X_train.astype("float32") / 255
+
+# Convert class vectors to binary class matrices.
+y_train = np_utils.to_categorical(y_train, 10)
+
+# Build a validation set
+X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.1, random_state=0)
+```
+
+### Test data
+
+The test data is also loaded and pre-processed so predictions are easy to do. Some digits are also visualised.
+
+```{python}
+#| label: fig-data-examples-test
+#| fig-cap: "Examples of digit images from the test set"
+
+# Load the test dataset
+X_test = pd.read_csv('../data/test.csv')
+
+# Reshape the data to an array of 28x28x1 images
+X_test = np.array(X_test).reshape(-1,28,28,1)
+
+# Glance at the data
+count = 0
+sample_size = 20
+plt.figure(figsize=(16, 6))
+for i in np.random.permutation(X_test.shape[0])[:sample_size]:
+    count = count + 1
+    plt.subplot(1, sample_size, count)
+    plt.axhline("")
+    plt.axvline("")
+    plt.imshow(X_train[i].reshape(28, 28), cmap=plt.cm.Greys)
+plt.show();
+```
+
+# Baseline model
+
+We start by building a basic model that will later be improved by adding more layers, by changing the learning process or by modifying the input data.
+
+## Model architecture
+
+We start by defining the architecture of the convolutional neural net (CNN) model that will be trained on MNIST. The different parts composing the model are detailled in the following sections.
+
+### The convolution layer
+
+This layer is the main one for CNN. A kernel is convolved on the image (i.e. applied on the entire image step by step). At each step the dot product of the kernel and the part of the image _under_ the kernel is the value of the pixel of the resulting feature map (the output image). Convolution is exemplified with the following gif. In this case a 3x3 kernel is applied (no padding and no stride) on the image. Each pixel of the feature map, in green, comes from the dot product of a 3x3 kernel with a part of the input image, in dark blue. The parameter of the kernel are learned by the model.
+
+<p align="center">
+    <img src="../sources/convolution.gif" width="200">
+</p>
+
+<p align="center">
+    <em>3x3 kernel convolution.<a href="https://github.com/vdumoulin/conv_arithmetic"> Source</a></em>
+</p>
+
+
+### Max pooling
+
+A [max-pooling layer](https://machinelearningmastery.com/pooling-layers-for-convolutional-neural-networks/) reduces the size of its input. It does so by convolving a kernel and keeping only the max value (average pooling also exists). It is exemplified here. A 2x2 kernel is applied on a 4x4 input image. Only the max value is kept at each step and the resulting image is of size 2x2. The resulting image is 2 times smaller.
+
+<p align="center">
+    <img src="../sources/maxpool.gif" width="300">
+</p>
+
+<p align="center">
+    <em>2x2 Max-Pooling.<a href="https://nico-curti.github.io/NumPyNet/NumPyNet/layers/maxpool_layer.html"> Source</a></em>
+</p>
+
+### Activation functions
+
+Acrivations functions are needed to add non-linearities in the model. After each layer an activation function is added. The [Rectified Linear Unit](https://machinelearningmastery.com/rectified-linear-activation-function-for-deep-learning-neural-networks/) (ReLU for short) activation function is the default one for CNNs and Multi-Layer-Perceptrons. 
+
+$$
+\begin{equation}
+ReLU(x) = 
+\begin{dcases}
+    x,& \text{if } x\geq 0\\
+    0,              & \text{otherwise}
+\end{dcases}
+\end{equation}
+$$
+
+The last layer has a different activation function as it must ouptut a probability in a multi-class problem. It must ouptut a number between 0 and 1 for each class, and the sum has to be 1. The [softmax](https://machinelearningmastery.com/softmax-activation-function-with-python/) function is used. In our case we want to predict 10 values, $x_0, x_1, \dots, x_9$, one for each digit. The probabilities are obtained using this formula:
+
+$$
+\begin{equation}
+sofmax(x_i) = \frac{e^{x_i}}{\sum_{j=0}^{9}e^{x_j}}
+\end{equation}
+$$
+
+### Weights initialization
+
+The different layers (convolution, perceptron, max-pooling, ...) have parameters that will be updated during the training. Before any update, initial values must be set. The [He initialization](https://machinelearningmastery.com/weight-initialization-for-deep-learning-neural-networks/) is used to initialize all the weights prior to training. Weights are defined using a gaussian distribution centered on 0 with a standard deviation of $\frac{2}{\sqrt n}$ where $n$ is the number of inputs of the node.
+
+### Mini-Batch gradient descent
+
+Gradient descent is used to update the parameters (aka weights) of the model. A great explanation can be found in [this video](https://www.youtube.com/watch?v=sDv4f4s2SB8) from the StatQuest Youtube channel. The basic idea is to update the parameters in direction opposite of the gradient.
+
+The input data is fed to the neural net, this is the forward pass. The derivative of the loss with regard of each parameter is computed and is used to update the parameters. There exists different ways of doing [gradient descent](https://towardsdatascience.com/batch-mini-batch-stochastic-gradient-descent-7a62ecba642a) depending on the number of training example used at each iteration:
+
+* Batch gradient descent: the entire dataset is fed to the neural net and the average gradient is computed to update the parameter.
+* Stochastic gradient descent: the parameter update process is done with each trainig example, one at a time.
+* Mini-batch gradient descent: a small batch of data is fed to the net, the average gradient is used to update the parameters. This is what is used in our case.
+
+To update a parameter $\theta$, with $L(\theta)$ being the loss and $\alpha$ the learning rate (explained in the next section), we have:
+
+$$
+\begin{equation}
+\theta_{updated} = \theta - (\alpha * \frac{\delta L(\theta)}{\delta \theta})
+\end{equation}
+$$
+
+### Learning rate
+
+It specifies the amount that the weights are updated at each step. Choosing the learning rate is challenging as a value too small may result in a long training process that could get stuck, whereas a value too large may result in learning a sub-optimal set of weights too fast or an unstable training process.
+
+### Loss and metric
+
+The loss is used to optimize the model (e.g. find the best parameters) during the backpropagation process. The metric is simply here to display the performance of the model, it is more understandable for a human than the loss itself.
+
+The loss is the [cross entropy](https://machinelearningmastery.com/cross-entropy-for-machine-learning/). It is a measure of the difference between 2 probability distributions. In our case the the discrete probability distribution outputed by the model, $Q(x)$ and the true probability distribution, $P(x)$ which is 1 for the true digit and 0 otherwise. It is defined as:
+
+$$
+\begin{equation}
+H(P,Q) = -\sum_{x=0}^{9} P(x_i)log(Q(x_i))
+\end{equation}
+$$
+
+$P(x)$ is equal to 1 when $x$ is the true class and 0 otherwise.
+
+The metric is the accuracy. It is simply the number of correctly predicted digits divided by the total number of predictions.
+
+## Model definition in Keras
+
+The Keras framework is used to defined the model and to train it. The different functions used to defined the model are the following:
+
+* [Conv2D()](https://keras.io/api/layers/convolution_layers/convolution2d/): the 2 main arguments are the number of kernels to use and the size of then. The first convolution layer also need the `input_shape` argument. The `activation` and the `kernel_initializer` have default values but we set different ones.
+* [MaxPooling2D()](https://keras.io/api/layers/pooling_layers/max_pooling2d/): the default size of the kernel used is 2x2.
+* [Flatten()](https://keras.io/api/layers/reshaping_layers/flatten/): it takes no argument, it simply flatten the arrays from the previous layers to a one dimension vector.
+* [Dense()](https://keras.io/api/layers/core_layers/dense/): the main argument is the number of nodes.The `activation` and the `kernel_initializer` have default values but we set different ones. The last layer uses a different activation function to output probabilities.
+
+To compile the model, i.e. to fit it, an optimizer must be defined. Here we use [SGD()](https://keras.io/api/optimizers/sgd/).
+```{python}
+#| echo: true
+
+# Define the cnn model architecture
+basic_model = Sequential()
+basic_model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', input_shape=(28, 28, 1)))
+basic_model.add(MaxPooling2D((2, 2)))
+basic_model.add(Flatten())
+basic_model.add(Dense(100, activation='relu', kernel_initializer='he_uniform'))
+basic_model.add(Dense(10, activation='softmax'))
+
+# Define the optimizer
+opt = keras.optimizers.SGD(learning_rate=0.01, momentum=0.9)
+basic_model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
+```
+
+The model produced is visualised in the next figure.
+
+```{python}
+#| label: fig-basic-model
+#| fig-cap: "Architecture of the basic model"
+
+visualkeras.layered_view(basic_model, legend=True)
+```
+
+
+### Layer shape
+
+The shape of the different layers can be visualised in the next table.
+```{python}
+#| label: tbl-layer-basic
+#| tbl-cap: Layer shape
+
+summary_df = pd.DataFrame(columns=["Layer type", "Shape", "Nb Params"])
+for layer in basic_model.layers:
+    summary_df = pd.concat([summary_df, pd.DataFrame([{"Layer type": layer.__class__.__name__, "Shape": layer.output_shape, "Nb Params": layer.count_params()}])], ignore_index=True)
+
+Markdown(tabulate(
+    summary_df.to_dict('list'), 
+    headers=["Layer type", "Shape", "Nb Params"]
+))
+```
+
+
+The output shapes are obtained from the transformation applied: 
+
+* Input layer is 28x28x1
+* First layer is a convolution of 32 $3\times3$ kernels without padding and stride: the depth is 32, each feature map is 26x26. The outermost pixels (first and last rows, first and last columns) are _lost_.
+* Second layer is a max pooling of size 2x2: the output layer has the same depth of 32 and each feature map is divided by 2 so the size is 13x13.
+* The first dense layer is simply all the values from the 32 feature maps: 32 x 13 x 13 = 5408.
+* The second dense layer has size 100 as defined in the previous one. 
+* Output layer is of size 10.
+
+[This blog post](https://kvirajdatt.medium.com/calculating-output-dimensions-in-a-cnn-for-convolution-and-pooling-layers-with-keras-682960c73870) details the way to compute the output shape for convolution and pooling.
+
+### Number of parameters
+
+* The first layer is a convolutional one, it has 32 kernels of size $3\times3$. It has $(3 \times 3 + 1) \times 32 = 320$ parameters. The $+1$ part comes from the bias that is added after convolving the kernel.
+* The pooling layer has no parameter, it simply takes the max value in a $2 \times 2$ kernel.
+* The flatten layer does not have parameter, it reorganises the data in a different way.
+* The first dense layer has 100 cells for 5408 input data: there are $100 \times 5408 \text{ weights} + 100 \text{ bias} = 540900$ parameters in total.
+* The last layer has 10 cells of each 100 inputs, likewise it has $10 \times 100 \text{ weights} + 10 \text{ bias} = 1010$ parameters.
+
+There are more than 540K parameters in total.
+
+## Training
+
+The model is trained using a batch size of 32 and 10 epochs. This means that the entire training dataset will be used 10 times and gradients will be computed using batches of 32 images. 
+A validation set is used to compute the error at each epoch and see the evolution of the learning process. 10% is used as a validation set which represents about 4k images ($42000 \times 0.1 = 4200$).
+The total number of gradients updates are then $\frac{42000 - 4200}{32} \times 10 \text{ epochs} \approx 11820$. The 1182 that appears in the output of the training (when `verbose=2`) is the number of images divided by the number of batches taken as an integer. 
+
+We define a callback function to keep track of the training time. This is not required to train the model but we add this callback in order to keep track of the training time and compare the models not only on their performance but also on their time to train.
+
+```{python}
+# Define a time measurement callback
+class TimeHistory(keras.callbacks.Callback):
+    def on_train_begin(self, logs={}):
+        self.times = []
+
+    def on_epoch_begin(self, batch, logs={}):
+        self.epoch_time_start = time.time()
+
+    def on_epoch_end(self, batch, logs={}):
+        self.times.append(time.time() - self.epoch_time_start)
+        
+time_callback = TimeHistory()
+```
+
+```{python}
+#| echo: true
+
+# Train the model
+model_result = basic_model.fit(
+    X_train, # Training images
+    y_train, # Training labels
+    batch_size=32, # Number of images by batch
+    epochs=10, # Number of times the entire dataset is used in the training
+    validation_data=(X_val, y_val), # Validation data
+    callbacks=[time_callback], # Callbacks called at each end of epoch training
+    verbose=0 # No logs during training
+)
+```
+
+## Evaluation
+
+To evaluate the performance of the model, the accuracy on the validation set is analysed along with its evolution accross the different epochs. Predictions on the test set are also performed to make a submission. 
+
+### Validation accuracy
+
+```{python data-shape}
+display(Markdown("""
+The accuracy on the validation set is {val_acc}\\%. On the training set it is {train_acc}%. The training took {train_time} seconds.
+""".format(
+    val_acc='{:.3f}'.format(model_result.history['val_accuracy'][-1] * 100), 
+    train_acc='{:.3f}'.format(model_result.history['accuracy'][-1] * 100),
+    train_time='{:.0f}'.format(sum(time_callback.times)))))
+```
+
+```{python}
+#| label: fig-eval-basic
+#| fig-cap: "Classification Accuracy evolution"
+
+plt.plot(model_result.history['accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][0], label='Train')
+plt.plot(model_result.history['val_accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][1], label='Validation')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show();
+```
+
+The error on the training set is almost at 0%. On the validation set it is a bit higher than 1%. On @fig-eval-basic we can see that the validation accuracy seems to be increasing a bit on the last epochs. More epochs will be added in a subsequent test.
+
+Let's make a submission on Kaggle to evaluate our model on the test set.
+
+```{python}
+#| eval: false
+#| echo: true
+
+# Make predictions on the test images
+predictions = basic_model.predict(X_test)
+
+# Convert the prediction to labels taking the argmax
+predictions = [np.argmax(pred) for pred in predictions]
+
+# Build the submission file
+pd.DataFrame(data={'ImageId': list(range(1, 28001)), 'Label': predictions}).to_csv('submission/model0_basic.csv', index=False)
+```
+
+The obtained score is 95.703% which is lower than what we obtained on the validation set.
+
+# Going deeper
+
+The feature extraction capacity (the convolution layers) is increased. Convolutional layers are added to the model. For some layers, the arguments `padding='same'` and `strides=1` are used to keep the feature map the same size as the input. The last feature map is smaller than in the previous model, the total number of parameters is then lower (since the dense layer use a smaller input).
+
+```{python}
+#| echo: true
+
+# Define the cnn model architecture
+deeper_model = Sequential()
+deeper_model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', input_shape=(28, 28, 1)))
+deeper_model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', strides=1))
+deeper_model.add(MaxPooling2D((2, 2)))
+deeper_model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', strides=1))
+deeper_model.add(MaxPooling2D((2, 2)))
+deeper_model.add(Conv2D(126, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Flatten())
+deeper_model.add(Dense(100, activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Dense(10, activation='softmax'))
+
+# Define the optimizer
+opt = keras.optimizers.SGD(learning_rate=0.01, momentum=0.9)
+deeper_model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
+```
+
+The model produced is visualised in the next figure.
+
+```{python}
+#| label: fig-deeper-model
+#| fig-cap: "Architecture of the model"
+
+visualkeras.layered_view(deeper_model, legend=True)
+```
+
+```{python}
+#| label: tbl-layer-deeper
+#| tbl-cap: Layer shape
+
+summary_df = pd.DataFrame(columns=["Layer type", "Shape", "Nb Params"])
+for layer in deeper_model.layers:
+    summary_df = pd.concat([summary_df, pd.DataFrame([{"Layer type": layer.__class__.__name__, "Shape": layer.output_shape, "Nb Params": layer.count_params()}])], ignore_index=True)
+
+Markdown(tabulate(
+    summary_df.to_dict('list'), 
+    headers=["Layer type", "Shape", "Nb Params"]
+))
+```
+
+```{python}
+#| echo: true
+
+# Train the model
+model_result = deeper_model.fit(
+    X_train, # Training images
+    y_train, # Training labels
+    batch_size=32, # Number of images by batch
+    epochs=10, # Number of times the entire dataset is used in the training
+    validation_data=(X_val, y_val), # Validation data
+    callbacks=[time_callback], # Callbacks called at each end of epoch training
+    verbose=0 # No logs during training
+)
+```
+
+```{python data-shape}
+display(Markdown("""
+The accuracy on the validation set is {val_acc}%. On the training set it is {train_acc}%. The training took {train_time} seconds.
+""".format(
+    val_acc='{:.3f}'.format(model_result.history['val_accuracy'][-1] * 100), 
+    train_acc='{:.3f}'.format(model_result.history['accuracy'][-1] * 100),
+    train_time='{:.0f}'.format(sum(time_callback.times)))))
+```
+
+```{python}
+#| label: fig-eval-deeper
+#| fig-cap: "Classification Accuracy evolution"
+
+plt.plot(model_result.history['accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][0], label='Train')
+plt.plot(model_result.history['val_accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][1], label='Validation')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show();
+```
+
+The validation accuracy displays a constant slight increase. Maybe a better learning rate should be considered after some epochs (this will be explored in a later iteration). The overal accuracy is a bit better. Let's see what the performance on the test set will be.
+
+```{python}
+#| eval: false
+#| echo: true
+
+# Make predictions on the test images
+predictions = deeper_model.predict(X_test)
+
+# Convert the prediction to labels taking the argmax
+predictions = [np.argmax(pred) for pred in predictions]
+
+# Build the submission file
+pd.DataFrame(data={'ImageId': list(range(1, 28001)), 'Label': predictions}).to_csv('submission/model1_deeper.csv', index=False)
+```
+
+The performance is indeed better with a score of 98.882%.
+
+# Adding different layers
+
+The previous model is improved by adding batch normalization and dropout.
+
+[Batch normalization](https://towardsdatascience.com/batch-normalization-in-3-levels-of-understanding-14c2da90a338#b93c) is the process of standardization of the output values of a layer. For a batch of size $k$, the $k$ output values of a specific layer are standardized to have 0 mean and a standard deviation of 1. A linear transformation is applied (the parameters are learned) to let the model adjust the biais.
+
+[Dropout layers](https://machinelearningmastery.com/dropout-for-regularizing-deep-neural-networks/) consist in randomnly setting weight values to 0. This is done to avoid overfitting.
+
+```{python}
+#| echo: true
+
+# Define the cnn model architecture
+deeper_model_bn_do = Sequential()
+deeper_model_bn_do.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', input_shape=(28, 28, 1)))
+deeper_model_bn_do.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', strides=1))
+deeper_model_bn_do.add(BatchNormalization())
+deeper_model_bn_do.add(MaxPooling2D((2, 2)))
+deeper_model_bn_do.add(Dropout(0.4))
+deeper_model_bn_do.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model_bn_do.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model_bn_do.add(BatchNormalization())
+deeper_model_bn_do.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', strides=1))
+deeper_model_bn_do.add(BatchNormalization())
+deeper_model_bn_do.add(MaxPooling2D((2, 2)))
+deeper_model_bn_do.add(Dropout(0.4))
+deeper_model_bn_do.add(Conv2D(126, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model_bn_do.add(Flatten())
+deeper_model_bn_do.add(Dense(100, activation='relu', kernel_initializer='he_uniform'))
+deeper_model_bn_do.add(Dropout(0.4))
+deeper_model_bn_do.add(Dense(10, activation='softmax'))
+
+# Define the optimizer
+opt = keras.optimizers.SGD(learning_rate=0.01, momentum=0.9)
+deeper_model_bn_do.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
+```
+
+The model produced is visualised in the next figure.
+
+```{python}
+#| label: fig-deeper-bn--model
+#| fig-cap: "Architecture of the model"
+
+visualkeras.layered_view(deeper_model_bn_do, legend=True)
+```
+
+```{python}
+#| label: tbl-layer-deeper-bn
+#| tbl-cap: Layer shape
+
+summary_df = pd.DataFrame(columns=["Layer type", "Shape", "Nb Params"])
+for layer in deeper_model_bn_do.layers:
+    summary_df = pd.concat([summary_df, pd.DataFrame([{"Layer type": layer.__class__.__name__, "Shape": layer.output_shape, "Nb Params": layer.count_params()}])], ignore_index=True)
+
+Markdown(tabulate(
+    summary_df.to_dict('list'), 
+    headers=["Layer type", "Shape", "Nb Params"]
+))
+```
+```{python}
+#| echo: true
+
+# Train the model
+model_result = deeper_model_bn_do.fit(
+    X_train, # Training images
+    y_train, # Training labels
+    batch_size=32, # Number of images by batch
+    epochs=10, # Number of times the entire dataset is used in the training
+    validation_data=(X_val, y_val), # Validation data
+    callbacks=[time_callback], # Callbacks called at each end of epoch training
+    verbose=0 # No logs during training
+)
+```
+
+```{python data-shape}
+display(Markdown("""
+The accuracy on the validation set is {val_acc}%. On the training set it is {train_acc}%. The training took {train_time} seconds.
+""".format(
+    val_acc='{:.3f}'.format(model_result.history['val_accuracy'][-1] * 100), 
+    train_acc='{:.3f}'.format(model_result.history['accuracy'][-1] * 100),
+    train_time='{:.0f}'.format(sum(time_callback.times)))))
+```
+
+```{python}
+#| label: fig-eval-bn-do
+#| fig-cap: "Classification Accuracy evolution"
+
+plt.plot(model_result.history['accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][0], label='Train')
+plt.plot(model_result.history['val_accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][1], label='Validation')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show();
+```
+
+The accuracy on the validation set is increasing (more epochs will be added on the next iteration). The overall accuracy is also better than before. Let's check this by making another submision. 
+
+The performance decreases quite a lot with a score of only 84.314%. Batch-normalisation seems to add quite a lot of instability. I don't know the reasons behind this drop in performance.
+
+# No pain no gain
+
+The training process is increased by modifying the learning rate and the number of epochs. An adaptive learning is used, this means that the value of the learning rate will decrease epoch after epoch to fine-tune the training. The training is much slower in this case but hopefully results will be better. Intermediate results are saved in case the training is stopped with the `ModelCheckpoint` function. The training is automatically stopped if the accuracy on the validation set stops increasing for a specified number of epochs. 
+
+```{python}
+#| echo: true
+
+# Define the cnn model architecture
+deeper_model = Sequential()
+deeper_model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', input_shape=(28, 28, 1)))
+deeper_model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', strides=1))
+deeper_model.add(MaxPooling2D((2, 2)))
+deeper_model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', strides=1))
+deeper_model.add(MaxPooling2D((2, 2)))
+deeper_model.add(Conv2D(126, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Flatten())
+deeper_model.add(Dense(100, activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Dense(10, activation='softmax'))
+
+# Define the optimizer
+opt = keras.optimizers.SGD(learning_rate=0.01, momentum=0.9)
+deeper_model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
+```
+
+```{python}
+#| label: fig-deeper-long-model
+#| fig-cap: "Architecture of the model"
+
+visualkeras.layered_view(deeper_model, legend=True)
+```
+
+```{python}
+#| label: tbl-layer-deeper-long
+#| tbl-cap: Layer shape
+
+summary_df = pd.DataFrame(columns=["Layer type", "Shape", "Nb Params"])
+for layer in deeper_model.layers:
+    summary_df = pd.concat([summary_df, pd.DataFrame([{"Layer type": layer.__class__.__name__, "Shape": layer.output_shape, "Nb Params": layer.count_params()}])], ignore_index=True)
+
+Markdown(tabulate(
+    summary_df.to_dict('list'), 
+    headers=["Layer type", "Shape", "Nb Params"]
+))
+```
+
+```{python}
+#| echo: true
+
+# Define an early stopping method
+earlyStopper = EarlyStopping(
+        monitor="val_accuracy", # metrics to monitor
+        mode="max", # the metric to monitor has to be maximized
+        patience=10, # how many epochs before stop
+        verbose=0, # no message
+        min_delta=0.000001, # threshold under which the difference is not considered significant
+        restore_best_weights=True,
+)
+
+# Define the learning rate decay schedule
+lrDecay = ReduceLROnPlateau(
+        monitor="val_accuracy", # metrics to monitor
+        mode="max", 
+        min_delta=0.000001, 
+        factor=0.5, # reduction factor (lr = lr * factor)
+        patience=3, # how many epochs before lr reduction
+        verbose=0, # no message
+        min_lr=0.0001, # minimum lr possible
+)
+
+# Define a checkpoint method to save intermediate results
+checkpointer = ModelCheckpoint(
+    filepath = 'model_checkpoint/cnn.{epoch:02d}-{val_loss:.6f}.hdf5',
+    verbose=0,
+    save_best_only=True, 
+    save_weights_only = True
+)
+
+# Train the model
+model_result = deeper_model.fit(
+    X_train, 
+    y_train, 
+    validation_data=(X_val, y_val), 
+    epochs=50, 
+    batch_size=32, 
+    callbacks=[earlyStopper, lrDecay, checkpointer, time_callback],
+    verbose=0
+)
+```
+
+```{python data-shape}
+display(Markdown("""
+The accuracy on the validation set is {val_acc}%. On the training set it is {train_acc}%. The training took {train_time} seconds.
+""".format(
+    val_acc='{:.3f}'.format(model_result.history['val_accuracy'][-1] * 100), 
+    train_acc='{:.3f}'.format(model_result.history['accuracy'][-1] * 100),
+    train_time='{:.0f}'.format(sum(time_callback.times)))))
+```
+
+```{python}
+#| label: fig-eval-deeper-long
+#| fig-cap: "Classification Accuracy evolution"
+
+plt.plot(model_result.history['accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][0], label='Train')
+plt.plot(model_result.history['val_accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][1], label='Validation')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show();
+```
+
+The training stopped at epoch 20 due to no improvements in the accuracy. The last 10 epochs did not help the training in gaining accuracy. The performance on the validation set is quite high, let's check this on the test set. 
+
+The score obtained is 0.99075 which is the best so far. 
+
+# Adam
+
+Another way of improving the training process is to use the Adam optimizer instead of manually defining a adaptive learning rate. The model is kept the same, only the optimizer is modified.
+
+```{python}
+# Define the cnn model architecture
+deeper_model_adam = Sequential()
+deeper_model_adam.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', input_shape=(28, 28, 1)))
+deeper_model_adam.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', strides=1))
+deeper_model_adam.add(MaxPooling2D((2, 2)))
+deeper_model_adam.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model_adam.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model_adam.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', strides=1))
+deeper_model_adam.add(MaxPooling2D((2, 2)))
+deeper_model_adam.add(Conv2D(126, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model_adam.add(Flatten())
+deeper_model_adam.add(Dense(100, activation='relu', kernel_initializer='he_uniform'))
+deeper_model_adam.add(Dense(10, activation='softmax'))
+
+# Define the optimizer
+opt = keras.optimizers.Adam()
+deeper_model_adam.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
+```
+
+```{python}
+#| label: fig-adam-model
+#| fig-cap: "Architecture of the model"
+
+visualkeras.layered_view(deeper_model_adam, legend=True)
+```
+
+```{python}
+#| label: tbl-layer-adam
+#| tbl-cap: Layer shape
+
+summary_df = pd.DataFrame(columns=["Layer type", "Shape", "Nb Params"])
+for layer in deeper_model_adam.layers:
+    summary_df = pd.concat([summary_df, pd.DataFrame([{"Layer type": layer.__class__.__name__, "Shape": layer.output_shape, "Nb Params": layer.count_params()}])], ignore_index=True)
+
+Markdown(tabulate(
+    summary_df.to_dict('list'), 
+    headers=["Layer type", "Shape", "Nb Params"]
+))
+```
+
+```{python}
+#| echo: true
+
+# Define an early stopping method
+earlyStopper = EarlyStopping(
+        monitor="val_accuracy", # metrics to monitor
+        mode="max", # the metric to monitor has to be maximized
+        patience=10, # how many epochs before stop
+        verbose=0, # no message
+        min_delta=0.000001, # threshold under which the difference is not considered significant
+        restore_best_weights=True,
+)
+
+# Train the model
+model_result = deeper_model_adam.fit(
+    X_train, 
+    y_train, 
+    validation_data=(X_val, y_val), 
+    epochs=50, 
+    batch_size=32, 
+    callbacks=[earlyStopper],
+    verbose=0
+)
+```
+
+```{python data-shape}
+display(Markdown("""
+The accuracy on the validation set is {val_acc}%. On the training set it is {train_acc}%. The training took {train_time} seconds.
+""".format(
+    val_acc='{:.3f}'.format(model_result.history['val_accuracy'][-1] * 100), 
+    train_acc='{:.3f}'.format(model_result.history['accuracy'][-1] * 100),
+    train_time='{:.0f}'.format(sum(time_callback.times)))))
+```
+
+```{python}
+#| label: fig-eval-adam
+#| fig-cap: "Classification Accuracy evolution"
+
+plt.plot(model_result.history['accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][0], label='Train')
+plt.plot(model_result.history['val_accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][1], label='Validation')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show();
+```
+
+The training stopped at epoch 20 due to no improvements in the accuracy. The performance is a bit lower than with the previous model.
+
+The socre is 0.98678 which is a little bit lower than the previous attempt.
+
+# If you can't improve the model, improve the data
+
+To have better predictions we will try to help the model by increasing the number of images in the training set. This will be done using data augmentation. Digits will be sligthly modified, the orientation will change, the position, the scale will be modified, to increased the diversity in the training data. 
+
+```{python}
+#| echo: true
+
+# Data augmentation generator
+datagen = ImageDataGenerator(
+        featurewise_center=False,  # Set input mean to 0 over the dataset, feature-wise.
+        samplewise_center=False,  # Set each sample mean to 0
+        featurewise_std_normalization=False,  # Divide inputs by std of the dataset, feature-wise
+        samplewise_std_normalization=False,  # Divide each input by its std
+        rotation_range=15,  # Degree range for random rotations
+        zoom_range = 0.01, # Range for random zoom (1-value / 1 + value)
+        width_shift_range=0.1,  # Range of random horizontal shift (fraction of total width)
+        height_shift_range=0.1,  # Range of random vertical shift (fraction of total height)
+)
+```
+
+```{python}
+# Define the cnn model architecture
+deeper_model = Sequential()
+deeper_model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', input_shape=(28, 28, 1)))
+deeper_model.add(Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(MaxPooling2D((2, 2)))
+deeper_model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(MaxPooling2D((2, 2)))
+deeper_model.add(Conv2D(126, (3, 3), activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Flatten())
+deeper_model.add(Dense(100, activation='relu', kernel_initializer='he_uniform'))
+deeper_model.add(Dense(10, activation='softmax'))
+
+# Define the optimizer
+opt = keras.optimizers.SGD(learning_rate=0.01, momentum=0.9)
+deeper_model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
+```
+
+```{python}
+#| label: fig-data-augment
+#| fig-cap: "Architecture of the model"
+
+visualkeras.layered_view(deeper_model, legend=True)
+```
+
+```{python}
+#| label: tbl-layer-data-augment
+#| tbl-cap: Layer shape
+
+summary_df = pd.DataFrame(columns=["Layer type", "Shape", "Nb Params"])
+for layer in deeper_model.layers:
+    summary_df = pd.concat([summary_df, pd.DataFrame([{"Layer type": layer.__class__.__name__, "Shape": layer.output_shape, "Nb Params": layer.count_params()}])], ignore_index=True)
+
+Markdown(tabulate(
+    summary_df.to_dict('list'), 
+    headers=["Layer type", "Shape", "Nb Params"]
+))
+```
+
+```{python}
+#| echo: true
+
+# Define an early stopping method
+earlyStopper = EarlyStopping(
+        monitor="val_accuracy", # metrics to monitor
+        mode="max", # the metric to monitor has to be maximized
+        patience=10, # how many epochs before stop
+        verbose=0, # no message
+        min_delta=0.000001, # threshold under which the difference is not considered significant
+        restore_best_weights=True,
+)
+
+# Define the learning rate decay schedule
+lrDecay = ReduceLROnPlateau(
+        monitor="val_accuracy", # metrics to monitor
+        mode="max", 
+        min_delta=0.000001, 
+        factor=0.7, # reduction factor (lr = lr * factor)
+        patience=2, # how many epochs before lr reduction
+        verbose=0, # no message
+        min_lr=0.0001, # minimum lr possible
+)
+
+# Train the model
+model_result = deeper_model.fit(
+    datagen.flow(X_train, y_train, batch_size=32),
+    validation_data=(X_val, y_val), 
+    epochs=50, 
+    steps_per_epoch=len(X_train) // 32,
+    callbacks=[earlyStopper, lrDecay, time_callback],
+    verbose=0
+)
+```
+
+```{python data-shape}
+display(Markdown("""
+The accuracy on the validation set is {val_acc}%. On the training set it is {train_acc}%. The training took {train_time} seconds.
+""".format(
+    val_acc='{:.3f}'.format(model_result.history['val_accuracy'][-1] * 100), 
+    train_acc='{:.3f}'.format(model_result.history['accuracy'][-1] * 100),
+    train_time='{:.0f}'.format(sum(time_callback.times)))))
+```
+
+```{python}
+#| label: fig-eval-data-augment
+#| fig-cap: "Classification Accuracy evolution"
+
+plt.plot(model_result.history['accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][0], label='Train')
+plt.plot(model_result.history['val_accuracy'], color=plt.rcParams['axes.prop_cycle'].by_key()['color'][1], label='Validation')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show();
+```
+
+The obtained score is 99.371% which the best we have. 
+
+
+# Conclusions
+
+Building a convolution neural net is pretty easy using the Keras library. You can have good results quite quickly. Improving your model to gain the extra point of percentage on the other hand is quite hard. You need a deeper model, more data, and a lot more training. Depending on your application it might not be forth the effort.
+
+
+# References
+
+* [How to Develop a CNN for MNIST Handwritten Digit Classification](https://machinelearningmastery.com/how-to-develop-a-convolutional-neural-network-from-scratch-for-mnist-handwritten-digit-classification/)
+* [Difference Between a Batch and an Epoch in a Neural Network](https://machinelearningmastery.com/difference-between-a-batch-and-an-epoch/)
+* [Calculating Output dimensions in a CNN for Convolution and Pooling Layers with KERAS](https://kvirajdatt.medium.com/calculating-output-dimensions-in-a-cnn-for-convolution-and-pooling-layers-with-keras-682960c73870)
+* [A gentle introduction to the Rectifield Linear Unit](https://machinelearningmastery.com/rectified-linear-activation-function-for-deep-learning-neural-networks/)
+* [Understand the impact of learning rate on neural network permormance](https://machinelearningmastery.com/understand-the-dynamics-of-learning-rate-on-deep-learning-neural-networks/)
+* [Cross entropy for classification](https://towardsdatascience.com/cross-entropy-for-classification-d98e7f974451)
+* [A gentle introduction to batch normalization](https://machinelearningmastery.com/batch-normalization-for-training-of-deep-neural-networks/)
+* [Btch normalization in 3 levels of understanding](https://towardsdatascience.com/batch-normalization-in-3-levels-of-understanding-14c2da90a338#b93c)
+* [Neural networks: training with backpropagation](https://www.jeremyjordan.me/neural-networks-training/)
+* [How to configure the learning rate when training big neural networks](https://machinelearningmastery.com/learning-rate-for-deep-learning-neural-networks/)
+
