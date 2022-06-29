@@ -177,6 +177,9 @@ X_test = pd.read_csv('../data/test.csv')
 # Reshape the data to an array of 28x28x1 images
 X_test = np.array(X_test).reshape(-1,28,28,1)
 
+# Scale the inputs to the range [0,1]
+X_test = X_test.astype("float32") / 255
+
 # Glance at the data
 count = 0
 sample_size = 20
@@ -646,6 +649,19 @@ plt.show();
 
 The accuracy on the validation set is increasing (more epochs will be added on the next iteration). The overall accuracy is also better than before. Let's check this by making another submision. 
 
+```{python}
+#| eval: false
+
+# Make predictions on the test images
+predictions = deeper_model_bn_do.predict(X_test)
+
+# Convert the prediction to labels taking the argmax
+predictions = [np.argmax(pred) for pred in predictions]
+
+# Build the submission file
+pd.DataFrame(data={'ImageId': list(range(1, 28001)), 'Label': predictions}).to_csv('submission/model2_bn_do.csv', index=False)
+```
+
 The performance decreases quite a lot with a score of only 84.314%. Batch-normalisation seems to add quite a lot of instability. I don't know the reasons behind this drop in performance.
 
 # No pain no gain
@@ -762,6 +778,19 @@ plt.show();
 
 The training stopped at epoch 20 due to no improvements in the accuracy. The last 10 epochs did not help the training in gaining accuracy. The performance on the validation set is quite high, let's check this on the test set. 
 
+```{python}
+#| eval: false
+
+# Make predictions on the test images
+predictions = deeper_model.predict(X_test)
+
+# Convert the prediction to labels taking the argmax
+predictions = [np.argmax(pred) for pred in predictions]
+
+# Build the submission file
+pd.DataFrame(data={'ImageId': list(range(1, 28001)), 'Label': predictions}).to_csv('submission/model3_long_train.csv', index=False)
+```
+
 The score obtained is 0.99075 which is the best so far. 
 
 # Adam
@@ -856,6 +885,19 @@ plt.show();
 ```
 
 The training stopped at epoch 20 due to no improvements in the accuracy. The performance is a bit lower than with the previous model.
+
+```{python}
+#| eval: false
+
+# Make predictions on the test images
+predictions = deeper_model_adam.predict(X_test)
+
+# Convert the prediction to labels taking the argmax
+predictions = [np.argmax(pred) for pred in predictions]
+
+# Build the submission file
+pd.DataFrame(data={'ImageId': list(range(1, 28001)), 'Label': predictions}).to_csv('submission/model4_adam.csv', index=False)
+```
 
 The socre is 0.98678 which is a little bit lower than the previous attempt.
 
@@ -974,6 +1016,19 @@ plt.xlabel('Epoch')
 plt.ylabel('Accuracy')
 plt.legend()
 plt.show();
+```
+
+```{python}
+#| eval: false
+
+# Make predictions on the test images
+predictions = deeper_model.predict(X_test)
+
+# Convert the prediction to labels taking the argmax
+predictions = [np.argmax(pred) for pred in predictions]
+
+# Build the submission file
+pd.DataFrame(data={'ImageId': list(range(1, 28001)), 'Label': predictions}).to_csv('submission/model5_final.csv', index=False)
 ```
 
 The obtained score is 99.371% which the best we have. 
